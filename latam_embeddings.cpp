@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <algorithm>
 
 typedef float Scalar;
 const int Dim = Eigen::Dynamic;
@@ -88,6 +89,7 @@ std::vector<LatamCitiesQA> load_latam_dataset(const std::string & filename, std:
             item.metadata["city"] = root.get("city", "").asString();
             item.metadata["country"] = root.get("country", "").asString();
             item.metadata["topic"] = root.get("topic", "").asString();
+            item.metadata["answer"] = root.get("answer", "").asString(); // Keep answer for display
             
             if (root.isMember("metadata") && root["metadata"].isObject()) {
                 for (auto const& id : root["metadata"].getMemberNames()) {
@@ -106,37 +108,29 @@ std::vector<LatamCitiesQA> load_latam_dataset(const std::string & filename, std:
     return dataset;
 }
 
-void compute_latam_embeddings(
+void compute_embeddings(
     const llama_model * model,
     llama_context * ctx,
     const common_params & params,
-    const std::vector<std::string> & answers,
-    std::vector<LatamCitiesQA> & dataset
+    const std::vector<std::string> & texts,
+    std::vector<Eigen::Matrix<Scalar, Dim, 1>> & output_embeddings
 ) {
     const llama_vocab * vocab = llama_model_get_vocab(model);
     const int n_embd_out = llama_model_n_embd_out(model);
     const enum llama_pooling_type pooling_type = llama_pooling_type(ctx);
 
-    if (answers.size() != dataset.size()) {
-        LOG_ERR("%s: answers and dataset size mismatch\n", __func__);
-        return;
-    }
-
-    // tokenize
     std::vector<std::vector<int32_t>> inputs;
-    for (const auto & answer : answers) {
-        inputs.push_back(common_tokenize(ctx, answer, true, true));
+    for (const auto & text : texts) {
+        inputs.push_back(common_tokenize(ctx, text, true, true));
     }
 
-    // check constraints
     for (size_t i = 0; i < inputs.size(); i++) {
         if (inputs[i].size() > params.n_batch) {
-            LOG_ERR("%s: prompt %zu exceeds batch size (%zu > %d)\n", __func__, i, inputs[i].size(), (int)params.n_batch);
+            LOG_ERR("%s: input %zu exceeds batch size (%zu > %d)\n", __func__, i, inputs[i].size(), (int)params.n_batch);
             return;
         }
     }
 
-    // count embeddings needed
     int n_embd_count = (pooling_type == LLAMA_POOLING_TYPE_NONE) ? 0 : (int)inputs.size();
     if (pooling_type == LLAMA_POOLING_TYPE_NONE) {
         for (const auto & inp : inputs) n_embd_count += (int)inp.size();
@@ -168,17 +162,14 @@ void compute_latam_embeddings(
         batch_decode(ctx, batch, out, n_embd_out, params.embd_normalize);
     }
 
-    // Transfer to Eigen
     if (pooling_type != LLAMA_POOLING_TYPE_NONE) {
-        for (int i = 0; i < (int)dataset.size(); ++i) {
-            dataset[i].embeddings.resize(n_embd_out);
+        output_embeddings.resize(texts.size());
+        for (int i = 0; i < (int)texts.size(); ++i) {
+            output_embeddings[i].resize(n_embd_out);
             for (int j = 0; j < n_embd_out; ++j) {
-                dataset[i].embeddings(j) = embeddings_buffer[i * n_embd_out + j];
+                output_embeddings[i](j) = embeddings_buffer[i * n_embd_out + j];
             }
         }
-        LOG_INF("%s: Processed and stored %zu embeddings in Eigen matrices\n", __func__, dataset.size());
-    } else {
-        LOG_WRN("%s: skipping Eigen transfer for NONE pooling\n", __func__);
     }
 
     llama_batch_free(batch);
@@ -231,16 +222,58 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    // 2. Compute Embeddings
-    compute_latam_embeddings(model, ctx, params, answers, dataset);
+    // 2. Compute Embeddings for dataset
+    std::vector<Eigen::Matrix<Scalar, Dim, 1>> dataset_embeddings;
+    compute_embeddings(model, ctx, params, answers, dataset_embeddings);
+    
+    for (size_t i = 0; i < dataset.size(); ++i) {
+        dataset[i].embeddings = dataset_embeddings[i];
+    }
 
-    // 3. Verification
-    if (!dataset.empty() && dataset[0].embeddings.size() > 0) {
-        std::cout << "\nVerification - First Item:\n";
-        std::cout << "  City: " << dataset[0].metadata["city"] << "\n";
-        std::cout << "  Question: " << dataset[0].metadata["question"] << "\n";
-        std::cout << "  Embedding Size: " << dataset[0].embeddings.size() << "\n";
-        std::cout << "  First 5 elements: " << dataset[0].embeddings.head(5).transpose() << "\n";
+    LOG_INF("%s: Dataset processed. Ready for queries.\n", __func__);
+
+    // 3. Interactive Query Loop
+    std::string query;
+    while (true) {
+        std::cout << "\nEnter query (or 'exit' to quit): ";
+        if (!std::getline(std::cin, query) || query == "exit") {
+            break;
+        }
+        if (query.empty()) continue;
+
+        std::vector<Eigen::Matrix<Scalar, Dim, 1>> query_emb_vec;
+        compute_embeddings(model, ctx, params, {query}, query_emb_vec);
+
+        if (query_emb_vec.empty()) continue;
+        const auto & query_emb = query_emb_vec[0];
+
+        // Calculate similarities
+        std::vector<std::pair<float, int>> similarities;
+        for (int i = 0; i < (int)dataset.size(); ++i) {
+            // Since vectors are normalized, cosine similarity is just the dot product
+            float sim = query_emb.dot(dataset[i].embeddings);
+            similarities.push_back({sim, i});
+        }
+
+        // Sort by similarity descending
+        std::sort(similarities.begin(), similarities.end(), 
+            [](const std::pair<float, int>& a, const std::pair<float, int>& b) {
+                return a.first > b.first;
+            });
+
+        // Print top 3 matches
+        std::cout << "\nTop Matches:\n";
+        for (int i = 0; i < std::min(3, (int)similarities.size()); ++i) {
+            int idx = similarities[i].second;
+            float score = similarities[i].first;
+            std::cout << i + 1 << ". [Score: " << score << "] " 
+                      << dataset[idx].metadata["city"] << " (" << dataset[idx].metadata["country"] << ")\n";
+            std::cout << "   Q: " << dataset[idx].metadata["question"] << "\n";
+            // Print a snippet of the answer
+            std::string ans = dataset[idx].metadata["answer"];
+            if (ans.length() > 200) ans = ans.substr(0, 197) + "...";
+            std::cout << "   A: " << ans << "\n\n";
+        }
     }
 
     // 4. Cleanup
