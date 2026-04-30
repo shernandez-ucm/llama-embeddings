@@ -32,6 +32,6 @@
 *.app
 
 build/
-models/
+*.gguf
 *.jsonl
-dataset/latam_cities.zip
+*.zip

@@ -8,14 +8,17 @@ To get started right away, run the following command, making sure to use the cor
 
 ### Unix-based systems (Linux, macOS, etc.):
 
+Descargar datos y modelo desde:
+
 ```bash
-./llama-embedding -m ./path/to/model --pooling mean --log-disable -p "Hello World!" 2>/dev/null
+https://drive.google.com/drive/folders/1TbnPydZJwm7vm-p1ro5dRnLhCq6buhYe?usp=share_link
 ```
 
-### Windows:
 
-```powershell
-llama-embedding.exe -m ./path/to/model --pooling mean --log-disable -p "Hello World!" 2>$null
+### Generar Embeddings:
+
+```bash
+llama-embedding -m ./path/to/model --pooling mean --log-disable -p "Hello World!" 2>$null
 ```
 
 The above command will output space-separated float values.
@@ -54,8 +57,4 @@ The above command will output space-separated float values.
 ./llama-embedding -p 'Castle<#sep#>Stronghold<#sep#>Dog<#sep#>Cat' --pooling mean --embd-separator '<#sep#>' --embd-normalize 2  --embd-output-format '' -m './path/to/model.gguf' --n-gpu-layers 99 --log-disable 2>/dev/null
 ```
 
-### Windows:
 
-```powershell
-llama-embedding.exe -p 'Castle<#sep#>Stronghold<#sep#>Dog<#sep#>Cat' --pooling mean --embd-separator '<#sep#>' --embd-normalize 2  --embd-output-format '' -m './path/to/model.gguf' --n-gpu-layers 99 --log-disable 2>/dev/null
-```
