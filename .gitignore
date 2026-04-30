@@ -34,3 +34,4 @@
 build/
 models/
 *.jsonl
+dataset/latam_cities.zip
