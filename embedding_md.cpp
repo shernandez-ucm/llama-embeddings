@@ -221,7 +221,12 @@ int main(int argc, char ** argv) {
         }
         LOG("...\n");
     }
-
+    for (int i = 0; i < (int)dataset.size(); ++i) {
+            dataset[i].embeddings.resize(n_embd_out);
+            for (int j = 0; j < n_embd_out; ++j) {
+                dataset[i].embeddings(j) = embeddings[i * n_embd_out + j];
+            }
+    }
     // clean up
     llama_batch_free(batch);
     llama_backend_free();

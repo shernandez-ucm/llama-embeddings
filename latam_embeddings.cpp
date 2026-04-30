@@ -19,6 +19,8 @@ struct LatamCitiesQA {
     std::map<std::string, std::string> metadata;
 };
 
+// --- Helper Functions ---
+
 static void batch_add_seq(llama_batch & batch, const std::vector<int32_t> & tokens, llama_seq_id seq_id) {
     size_t n_tokens = tokens.size();
     for (size_t i = 0; i < n_tokens; i++) {
@@ -62,6 +64,128 @@ static void batch_decode(llama_context * ctx, llama_batch & batch, float * outpu
     }
 }
 
+// --- Implementation Functions ---
+
+std::vector<LatamCitiesQA> load_latam_dataset(const std::string & filename, std::vector<std::string> & answers) {
+    std::vector<LatamCitiesQA> dataset;
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        LOG_ERR("%s: failed to open %s\n", __func__, filename.c_str());
+        return dataset;
+    }
+
+    std::string line;
+    Json::Value root;
+    Json::CharReaderBuilder builder;
+    std::string errs;
+
+    while (std::getline(file, line)) {
+        if (line.empty()) continue;
+        std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
+        if (reader->parse(line.c_str(), line.c_str() + line.length(), &root, &errs)) {
+            LatamCitiesQA item;
+            item.metadata["question"] = root.get("question", "").asString();
+            item.metadata["city"] = root.get("city", "").asString();
+            item.metadata["country"] = root.get("country", "").asString();
+            item.metadata["topic"] = root.get("topic", "").asString();
+            
+            if (root.isMember("metadata") && root["metadata"].isObject()) {
+                for (auto const& id : root["metadata"].getMemberNames()) {
+                    item.metadata[id] = root["metadata"][id].asString();
+                }
+            }
+
+            answers.push_back(root.get("answer", "").asString());
+            dataset.push_back(item);
+        } else {
+            LOG_WRN("%s: failed to parse JSON line: %s\n", __func__, errs.c_str());
+        }
+    }
+
+    LOG_INF("%s: Loaded %zu items from %s\n", __func__, dataset.size(), filename.c_str());
+    return dataset;
+}
+
+void compute_latam_embeddings(
+    const llama_model * model,
+    llama_context * ctx,
+    const common_params & params,
+    const std::vector<std::string> & answers,
+    std::vector<LatamCitiesQA> & dataset
+) {
+    const llama_vocab * vocab = llama_model_get_vocab(model);
+    const int n_embd_out = llama_model_n_embd_out(model);
+    const enum llama_pooling_type pooling_type = llama_pooling_type(ctx);
+
+    if (answers.size() != dataset.size()) {
+        LOG_ERR("%s: answers and dataset size mismatch\n", __func__);
+        return;
+    }
+
+    // tokenize
+    std::vector<std::vector<int32_t>> inputs;
+    for (const auto & answer : answers) {
+        inputs.push_back(common_tokenize(ctx, answer, true, true));
+    }
+
+    // check constraints
+    for (size_t i = 0; i < inputs.size(); i++) {
+        if (inputs[i].size() > params.n_batch) {
+            LOG_ERR("%s: prompt %zu exceeds batch size (%zu > %d)\n", __func__, i, inputs[i].size(), (int)params.n_batch);
+            return;
+        }
+    }
+
+    // count embeddings needed
+    int n_embd_count = (pooling_type == LLAMA_POOLING_TYPE_NONE) ? 0 : (int)inputs.size();
+    if (pooling_type == LLAMA_POOLING_TYPE_NONE) {
+        for (const auto & inp : inputs) n_embd_count += (int)inp.size();
+    }
+
+    std::vector<float> embeddings_buffer(n_embd_count * n_embd_out, 0);
+    float * emb_ptr = embeddings_buffer.data();
+
+    struct llama_batch batch = llama_batch_init(params.n_batch, 0, 1);
+    const int n_seq_max = llama_max_parallel_sequences();
+
+    int e = 0; // number of embeddings already stored
+    int s = 0; // number of prompts in current batch
+    for (int k = 0; k < (int)inputs.size(); k++) {
+        auto & inp = inputs[k];
+        if (batch.n_tokens + (int)inp.size() > (int)params.n_batch || s >= n_seq_max) {
+            float * out = emb_ptr + e * n_embd_out;
+            batch_decode(ctx, batch, out, n_embd_out, params.embd_normalize);
+            e += (pooling_type == LLAMA_POOLING_TYPE_NONE) ? batch.n_tokens : s;
+            s = 0;
+            common_batch_clear(batch);
+        }
+        batch_add_seq(batch, inp, s);
+        s += 1;
+    }
+
+    if (batch.n_tokens > 0) {
+        float * out = emb_ptr + e * n_embd_out;
+        batch_decode(ctx, batch, out, n_embd_out, params.embd_normalize);
+    }
+
+    // Transfer to Eigen
+    if (pooling_type != LLAMA_POOLING_TYPE_NONE) {
+        for (int i = 0; i < (int)dataset.size(); ++i) {
+            dataset[i].embeddings.resize(n_embd_out);
+            for (int j = 0; j < n_embd_out; ++j) {
+                dataset[i].embeddings(j) = embeddings_buffer[i * n_embd_out + j];
+            }
+        }
+        LOG_INF("%s: Processed and stored %zu embeddings in Eigen matrices\n", __func__, dataset.size());
+    } else {
+        LOG_WRN("%s: skipping Eigen transfer for NONE pooling\n", __func__);
+    }
+
+    llama_batch_free(batch);
+}
+
+// --- Main ---
+
 int main(int argc, char ** argv) {
     common_params params;
 
@@ -98,132 +222,28 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    const llama_vocab * vocab = llama_model_get_vocab(model);
-    const int n_embd_out = llama_model_n_embd_out(model);
-    const enum llama_pooling_type pooling_type = llama_pooling_type(ctx);
-
-    if (pooling_type == LLAMA_POOLING_TYPE_NONE) {
-        LOG_WRN("%s: pooling type is NONE, one embedding per token will be generated\n", __func__);
-    }
-
-    std::vector<LatamCitiesQA> dataset;
-    std::ifstream file("dataset/latam_cities_10.jsonl");
-    if (!file.is_open()) {
-        LOG_ERR("%s: failed to open dataset/latam_cities_10.jsonl\n", __func__);
-        return 1;
-    }
-
-    std::string line;
-    Json::Value root;
-    Json::CharReaderBuilder builder;
-    std::string errs;
-
+    // 1. Load Dataset
     std::vector<std::string> answers;
-
-    while (std::getline(file, line)) {
-        if (line.empty()) continue;
-        std::unique_ptr<Json::CharReader> reader(builder.newCharReader());
-        if (reader->parse(line.c_str(), line.c_str() + line.length(), &root, &errs)) {
-            LatamCitiesQA item;
-            item.metadata["question"] = root.get("question", "").asString();
-            item.metadata["city"] = root.get("city", "").asString();
-            item.metadata["country"] = root.get("country", "").asString();
-            item.metadata["topic"] = root.get("topic", "").asString();
-            
-            if (root.isMember("metadata") && root["metadata"].isObject()) {
-                for (auto const& id : root["metadata"].getMemberNames()) {
-                    item.metadata[id] = root["metadata"][id].asString();
-                }
-            }
-
-            answers.push_back(root.get("answer", "").asString());
-            dataset.push_back(item);
-        } else {
-            LOG_WRN("%s: failed to parse JSON line: %s\n", __func__, errs.c_str());
-        }
-    }
-
-    LOG_INF("%s: Loaded %zu items from dataset\n", __func__, dataset.size());
+    std::vector<LatamCitiesQA> dataset = load_latam_dataset("dataset/latam_cities_1000.jsonl", answers);
 
     if (dataset.empty()) {
-        LOG_ERR("%s: no items loaded from dataset\n", __func__);
+        LOG_ERR("%s: no data to process\n", __func__);
         return 1;
     }
 
-    std::vector<std::vector<int32_t>> inputs;
-    for (const auto & answer : answers) {
-        inputs.push_back(common_tokenize(vocab, answer, true, true));
+    // 2. Compute Embeddings
+    compute_latam_embeddings(model, ctx, params, answers, dataset);
+
+    // 3. Verification
+    if (!dataset.empty() && dataset[0].embeddings.size() > 0) {
+        std::cout << "\nVerification - First Item:\n";
+        std::cout << "  City: " << dataset[0].metadata["city"] << "\n";
+        std::cout << "  Question: " << dataset[0].metadata["question"] << "\n";
+        std::cout << "  Embedding Size: " << dataset[0].embeddings.size() << "\n";
+        std::cout << "  First 5 elements: " << dataset[0].embeddings.head(5).transpose() << "\n";
     }
 
-    for (size_t i = 0; i < inputs.size(); i++) {
-        if (inputs[i].size() > params.n_batch) {
-            LOG_ERR("%s: prompt %zu has %zu tokens, exceeding batch size %d\n", __func__, i, inputs[i].size(), (int)params.n_batch);
-            return 1;
-        }
-    }
-
-    // count number of embeddings
-    int n_embd_count = 0;
-    if (pooling_type == LLAMA_POOLING_TYPE_NONE) {
-        for (const auto & inp : inputs) {
-            n_embd_count += (int)inp.size();
-        }
-    } else {
-        n_embd_count = (int)inputs.size();
-    }
-    LOG_INF("%s: Embedding Size: %zu\n", __func__, n_embd_count);
-    LOG_INF("%s: Embedding Dimension: %zu\n", __func__, n_embd_out);
-
-    struct llama_batch batch = llama_batch_init(params.n_batch, 0, 1);
-
-    std::vector<float> all_embeddings(n_embd_count * n_embd_out, 0);
-    float * emb_data = all_embeddings.data();
-
-    int e = 0; // number of embeddings already stored
-    int s = 0; // number of prompts in current batch
-    
-    for (int k = 0; k < (int)inputs.size(); k++) {
-        auto & inp = inputs[k];
-        if (batch.n_tokens + (int)inp.size() > (int)params.n_batch || s >= (int)params.n_parallel) {
-            float * out = emb_data + e * n_embd_out;
-            batch_decode(ctx, batch, out, n_embd_out, params.embd_normalize);
-            e += (pooling_type == LLAMA_POOLING_TYPE_NONE) ? batch.n_tokens : s;
-            s = 0;
-            common_batch_clear(batch);
-        }
-        batch_add_seq(batch, inp, s);
-        s += 1;
-    }
-    
-    if (batch.n_tokens > 0) {
-        float * out = emb_data + e * n_embd_out;
-        batch_decode(ctx, batch, out, n_embd_out, params.embd_normalize);
-    }
-
-    // Transfer to Eigen
-    if (pooling_type != LLAMA_POOLING_TYPE_NONE) {
-        for (int i = 0; i < (int)dataset.size(); ++i) {
-            dataset[i].embeddings.resize(n_embd_out);
-            for (int j = 0; j < n_embd_out; ++j) {
-                dataset[i].embeddings(j) = all_embeddings[i * n_embd_out + j];
-            }
-        }
-    } else {
-        LOG_WRN("%s: skipping Eigen transfer for NONE pooling (not mapped to dataset items)\n", __func__);
-    }
-
-    LOG_INF("%s: Processed %zu items\n", __func__, dataset.size());
-
-    // Simple verification
-    if (!dataset.empty() && pooling_type != LLAMA_POOLING_TYPE_NONE) {
-        std::cout << "\nExample Metadata for first item:\n";
-        for (auto const& [key, val] : dataset[0].metadata) {
-            std::cout << "  " << key << ": " << val << "\n";
-        }
-        std::cout << "Embedding (first 5 elements): " << dataset[0].embeddings.head(5).transpose() << "\n";
-    }
-    
-    llama_batch_free(batch);
+    // 4. Cleanup
     llama_backend_free();
 
     return 0;
