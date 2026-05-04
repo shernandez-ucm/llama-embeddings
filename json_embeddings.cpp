@@ -180,6 +180,22 @@ void compute_embeddings(
 int main(int argc, char ** argv) {
     common_params params;
 
+    // Parse custom arguments first
+    std::string dataset_file = "dataset/latam_cities_1000.jsonl";
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+        if (arg == "--dataset" && i + 1 < argc) {
+            dataset_file = argv[++i];
+        } else if (arg == "--help" || arg == "-h") {
+            std::cout << "Usage: " << argv[0] << " [options]\n";
+            std::cout << "Options:\n";
+            std::cout << "  --dataset <file>    Dataset file to load (default: dataset/latam_cities_1000.jsonl)\n";
+            std::cout << "  --help, -h          Show this help message\n";
+            std::cout << "Other options are passed to llama.cpp\n";
+            return 0;
+        }
+    }
+
     if (!common_params_parse(argc, argv, params, LLAMA_EXAMPLE_EMBEDDING)) {
         return 1;
     }
@@ -215,7 +231,7 @@ int main(int argc, char ** argv) {
 
     // 1. Load Dataset
     std::vector<std::string> questions;
-    std::vector<LatamCitiesQA> dataset = load_latam_dataset("dataset/latam_cities_1000.jsonl", questions);
+    std::vector<LatamCitiesQA> dataset = load_latam_dataset(dataset_file, questions);
 
     if (dataset.empty()) {
         LOG_ERR("%s: no data to process\n", __func__);
