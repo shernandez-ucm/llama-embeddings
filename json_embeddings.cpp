@@ -67,7 +67,7 @@ static void batch_decode(llama_context * ctx, llama_batch & batch, float * outpu
 
 // --- Implementation Functions ---
 
-std::vector<LatamCitiesQA> load_latam_dataset(const std::string & filename, std::vector<std::string> & answers) {
+std::vector<LatamCitiesQA> load_latam_dataset(const std::string & filename, std::vector<std::string> & questions) {
     std::vector<LatamCitiesQA> dataset;
     std::ifstream file(filename);
     if (!file.is_open()) {
@@ -97,7 +97,7 @@ std::vector<LatamCitiesQA> load_latam_dataset(const std::string & filename, std:
                 }
             }
 
-            answers.push_back(root.get("answer", "").asString());
+            questions.push_back(root.get("question", "").asString());
             dataset.push_back(item);
         } else {
             LOG_WRN("%s: failed to parse JSON line: %s\n", __func__, errs.c_str());
@@ -214,8 +214,8 @@ int main(int argc, char ** argv) {
     }
 
     // 1. Load Dataset
-    std::vector<std::string> answers;
-    std::vector<LatamCitiesQA> dataset = load_latam_dataset("dataset/latam_cities_1000.jsonl", answers);
+    std::vector<std::string> questions;
+    std::vector<LatamCitiesQA> dataset = load_latam_dataset("dataset/latam_cities_1000.jsonl", questions);
 
     if (dataset.empty()) {
         LOG_ERR("%s: no data to process\n", __func__);
@@ -224,7 +224,7 @@ int main(int argc, char ** argv) {
 
     // 2. Compute Embeddings for dataset
     std::vector<Eigen::Matrix<Scalar, Dim, 1>> dataset_embeddings;
-    compute_embeddings(model, ctx, params, answers, dataset_embeddings);
+    compute_embeddings(model, ctx, params, questions, dataset_embeddings);
     
     for (size_t i = 0; i < dataset.size(); ++i) {
         dataset[i].embeddings = dataset_embeddings[i];
