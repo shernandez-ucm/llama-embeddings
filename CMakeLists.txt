@@ -17,7 +17,7 @@ set(LLAMA_BUILD_COMMON ON CACHE INTERNAL "Build common utilities library")
 # 2. Declare the remote repository details
 FetchContent_Declare(
   llama
-  GIT_REPOSITORY https://github.com/ggerganov/llama.cpp
+  GIT_REPOSITORY https://github.com/ggml-org/llama.cpp
   GIT_TAG        master # Or a specific tag/commit hash for stability
   #SOURCE_DIR     "${CMAKE_SOURCE_DIR}/external/llama.cpp" # Downloads here
   SOURCE_DIR     "/Users/sergio/code/llama.cpp" # Downloads here
@@ -56,6 +56,19 @@ add_executable(json_embeddings json_embeddings.cpp)
 target_include_directories(json_embeddings PRIVATE ${JSONCPP_INCLUDE_DIRS})
 target_link_directories(json_embeddings PRIVATE ${JSONCPP_LIBRARY_DIRS})
 target_link_libraries(json_embeddings 
+    PRIVATE
+        llama 
+        llama-common 
+        Threads::Threads 
+        ${JSONCPP_LIBRARIES}
+        Eigen3::Eigen
+)
+
+add_executable(json_embeddings_kdtree json_embeddings_kdtree.cpp)
+# Link libraries
+target_include_directories(json_embeddings_kdtree PRIVATE ${JSONCPP_INCLUDE_DIRS})
+target_link_directories(json_embeddings_kdtree PRIVATE ${JSONCPP_LIBRARY_DIRS})
+target_link_libraries(json_embeddings_kdtree 
     PRIVATE
         llama 
         llama-common 

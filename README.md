@@ -2,6 +2,10 @@
 
 This example demonstrates generate high-dimensional embedding vector of a given text with llama.cpp.
 
+```bash
+git clone https://github.com/ggml-org/llama.cpp
+```
+
 ## Quick Start
 
 To get started right away, run the following command, making sure to use the correct path for the model you have:
